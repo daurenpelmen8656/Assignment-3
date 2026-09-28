@@ -1,0 +1,178 @@
+@startuml
+title SnowLink: Bridge + Adapter (class diagram of the final code)
+skinparam dpi 130
+left to right direction
+skinparam shadowing false
+skinparam classAttributeIconSize 0
+skinparam packageStyle rectangle
+skinparam ArrowColor #444444
+skinparam class {
+  BackgroundColor #FDFDFD
+  BorderColor #555555
+  BackgroundColor<<Abstraction>> #E3F2FD
+  BackgroundColor<<Implementor>> #FFF3E0
+  BackgroundColor<<Adapter>> #E8F5E9
+  BackgroundColor<<Adaptee>> #FCE4EC
+}
+hide empty members
+
+package "snowlink.report  (Abstraction side)" {
+  abstract class StationReporter <<Abstraction>> {
+    -channel : UplinkChannel
+    #StationReporter(channel : UplinkChannel)
+    +{abstract} report(o : Observation) : DeliveryResult
+    #deliverOnce(f : Frame) : DeliveryResult
+    #deliver(f : Frame, maxAttempts : int, backoff : Duration) : DeliveryResult
+  }
+  class RoutineReporter <<Abstraction>> {
+    +report(o : Observation) : DeliveryResult
+  }
+  class AvalancheAlertReporter <<Abstraction>> {
+    -maxAttempts : int
+    -backoff : Duration
+    +report(o : Observation) : DeliveryResult
+  }
+  class DiagnosticsReporter <<Abstraction>> {
+    +report(o : Observation) : DeliveryResult
+  }
+  class DeliveryResult <<record>> {
+    +delivered : boolean
+    +attempts : int
+    +failure : FailureReason
+  }
+}
+
+package "snowlink.uplink  (Implementor side)" {
+  interface UplinkChannel <<Implementor>> {
+    +transmit(frame : Frame) : void  {throws UplinkException}
+  }
+  class FileUplinkChannel <<Implementor>> {
+    -file : Path
+    +transmit(frame : Frame) : void
+  }
+  class UdpUplinkChannel <<Implementor>> {
+    -host : String
+    -port : int
+    +transmit(frame : Frame) : void
+  }
+  class UplinkException {
+    +reason() : FailureReason
+  }
+  enum FailureReason {
+    UNREACHABLE
+    OVERLOADED
+    REJECTED
+    FAULT
+    +retryable() : boolean
+  }
+}
+
+package "snowlink.satellite" {
+  class SatelliteUplinkAdapter <<Adapter>> {
+    -modem : SatelliteModem
+    -recipientId : String
+    -poweredUp : boolean
+    +transmit(frame : Frame) : void
+    -ensurePoweredUp() : void
+    -toVendorPriority(p : Priority) : int
+    -translate(status : int) : UplinkException
+  }
+}
+
+package "vendor.satmodem  (third party, not modified)" {
+  class SatelliteModem <<Adaptee>> {
+    +powerUp() : int
+    +powerDown() : void
+    +sendBurst(payload : byte[], priorityCode : int, recipientId : String) : int
+    +pendingBursts() : int
+  }
+}
+
+package "snowlink.model" {
+  class Frame <<record>> {
+    +priority : Priority
+    +payload : String
+  }
+  class Observation <<record>> {
+    +stationId : String
+    +takenAt : Instant
+    +snowDepthCm : double
+    +airTempC : double
+    +windSpeedMs : double
+    +hazardLevel : int
+    +batteryPercent : int
+  }
+  enum Priority {
+    LOW
+    NORMAL
+    CRITICAL
+  }
+}
+
+package "snowlink.routing  (dynamic implementor selection)" {
+  class ChannelRegistry {
+    -factories : Map<String, ChannelFactory>
+    +register(scheme : String, f : ChannelFactory) : ChannelRegistry
+    +open(route : String) : UplinkChannel
+  }
+  interface ChannelFactory {
+    +create(route : URI) : UplinkChannel
+  }
+  class UnsupportedRouteException
+}
+
+package "snowlink.app" {
+  class DefaultChannels {
+    +{static} create() : ChannelRegistry
+    +{static} create(modem : SatelliteModem) : ChannelRegistry
+  }
+  class App {
+    +{static} main(args : String[]) : void
+  }
+}
+
+' ---- Bridge ----
+StationReporter o--> UplinkChannel : channel
+RoutineReporter --|> StationReporter
+AvalancheAlertReporter --|> StationReporter
+DiagnosticsReporter --|> StationReporter
+
+FileUplinkChannel ..|> UplinkChannel
+UdpUplinkChannel ..|> UplinkChannel
+SatelliteUplinkAdapter ..|> UplinkChannel
+
+' ---- Adapter ----
+SatelliteUplinkAdapter --> SatelliteModem : wraps
+
+' ---- contract ----
+UplinkChannel ..> Frame
+UplinkChannel ..> UplinkException : throws
+UplinkException --> FailureReason
+StationReporter ..> Observation
+StationReporter ..> DeliveryResult : returns
+DeliveryResult --> FailureReason
+Frame --> Priority
+
+' ---- routing / wiring ----
+ChannelRegistry o--> ChannelFactory
+ChannelRegistry ..> UplinkChannel : builds
+ChannelRegistry ..> UnsupportedRouteException : throws
+DefaultChannels ..> ChannelRegistry : configures
+DefaultChannels ..> FileUplinkChannel : registers "file"
+DefaultChannels ..> UdpUplinkChannel : registers "udp"
+DefaultChannels ..> SatelliteUplinkAdapter : registers "sat"
+App ..> DefaultChannels
+App ..> ChannelRegistry
+App ..> StationReporter
+
+note bottom of SatelliteUplinkAdapter
+  Translates vendor status codes into
+  UplinkException(FailureReason).
+  Hides power-up, byte[] payload and the
+  inverted priority scale (0 = most urgent).
+end note
+note bottom of SatelliteModem
+  Vendor SDK: no UplinkChannel,
+  int status codes instead of exceptions.
+end note
+@enduml
